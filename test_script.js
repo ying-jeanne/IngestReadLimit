@@ -77,18 +77,13 @@ const RAMP_DOWN_MIN = parseInt(__ENV.K6_RAMP_DOWN_MIN || 0);
  * Simulated Prometheus scrape interval in seconds.
  * @constant {number}
  */
-const SCRAPE_INTERVAL_SECONDS = parseInt(__ENV.K6_SCRAPE_INTERVAL_SECONDS || 20);
+const SCRAPE_INTERVAL_SECONDS = parseInt(__ENV.K6_SCRAPE_INTERVAL_SECONDS || 15);
 /**
  * Number of HA replicas to simulate (use 1 for no HA).
  * Causes every series to be sent this number of times.
  * @constant {number}
  */
 const HA_REPLICAS = parseInt(__ENV.K6_HA_REPLICAS || 1);
-/**
- * Number of HA clusters to simulate.
- * @constant {number}
- */
-const HA_CLUSTERS = parseInt(__ENV.K6_HA_CLUSTERS || 1);
 /**
  * Tenant ID to read from/write to.
  * By default, no tenant ID is specified requiring the cluster to have multi-tenancy disabled.
@@ -115,12 +110,6 @@ const query_client = new Httpx({
     headers: query_client_headers,
     timeout: 120e3 // 120s timeout.
 });
-
-// const query_request_rates = {
-//     range_queries: Math.ceil(READ_REQUEST_RATE * 0), // 75%
-//     instant_low_cardinality_queries: Math.ceil(READ_REQUEST_RATE * 0.90), // 20%
-//     instant_high_cardinality_queries: Math.ceil(READ_REQUEST_RATE * 0.10), // 5%
-// };
 
 /**
  * Exported configuration options for the k6 workers.
@@ -152,64 +141,29 @@ export const options = {
             stages: [
                 {
                     // Ramp up over a period of RAMP_UP_MIN to the target rate.
-                    target: (WRITE_REQUEST_RATE * HA_REPLICAS), duration: `${RAMP_UP_MIN}m`,
+                    target: (WRITE_REQUEST_RATE * HA_REPLICAS), duration: `0m`,
                 }, {
-                    target: (WRITE_REQUEST_RATE * HA_REPLICAS), duration: `${DURATION_MIN - RAMP_UP_MIN - RAMP_DOWN_MIN}m`,
+                    target: (WRITE_REQUEST_RATE * HA_REPLICAS), duration: `${DURATION_MIN - RAMP_DOWN_MIN}m`,
                 }, {
                     // Ramp back down over a period of RAMP_DOWN_MIN to a rate of 0.
                     target: 0, duration: `${RAMP_DOWN_MIN}m`,
                 },
             ]
         },
-        // reads_range_queries: {
-        //     executor: 'constant-arrival-rate',
-        //     rate: query_request_rates.range_queries,
-        //     timeUnit: '1s',
+        read_instant_queries: {
+            executor: 'constant-arrival-rate',
+            // 10 request per second
+            rate: READ_REQUEST_RATE,
+            timeUnit: '1s',
 
-        //     duration: `${DURATION_MIN}m`,
-        //     exec: 'run_range_query',
+            duration: `${DURATION_MIN}m`,
+            exec: 'read',
 
-        //     // The number of VUs should be adjusted based on how much load we're pushing on the read path.
-        //     // We estimated about 10 VU every query/sec.
-        //     preAllocatedVUs: query_request_rates.range_queries*10,
-        //     maxVus: query_request_rates.range_queries*10
-        // },
-        // reads_instant_queries_low_cardinality: {
-        //     executor: 'constant-arrival-rate',
-        //     rate: query_request_rates.instant_low_cardinality_queries,
-        //     timeUnit: '1s',
-
-        //     duration: `${DURATION_MIN}m`,
-        //     exec: 'run_instant_query_low_cardinality',
-
-        //     // The number of VUs should be adjusted based on how much load we're pushing on the read path.
-        //     // We estimated about 5 VU every query/sec.
-        //     preAllocatedVUs: query_request_rates.instant_low_cardinality_queries*5,
-        //     maxVus: query_request_rates.instant_low_cardinality_queries*5,
-        // },
-        // reads_instant_queries_high_cardinality: {
-        //     executor: 'constant-arrival-rate',
-        //     rate: query_request_rates.instant_high_cardinality_queries,
-        //     timeUnit: '1s',
-
-        //     // during 1 hour the query would be run every 1s, and 10 query per second
-        //     duration: `${DURATION_MIN}m`,
-        //     exec: 'run_instant_query_high_cardinality',
-
-        //     // The number of VUs should be adjusted based on how much load we're pushing on the read path.
-        //     // We estimated about 10 VU every query/sec.
-        //     preAllocatedVUs: query_request_rates.instant_high_cardinality_queries*10,
-        //     maxVus: query_request_rates.instant_high_cardinality_queries*10,
-        // },
-        // read_instant_queries: {
-        //     executor: 'constant-arrival-rate',
-        //     // 5 read queries per second
-        //     rate: READ_REQUEST_RATE,
-        //     timeUnit: '1s',
-
-        //     duration: `${DURATION_MIN}m`,
-
-        // }
+            // The number of VUs should be adjusted based on how much load we're pushing on the read path.
+            // We estimated about 5 VU every query/sec.
+            preAllocatedVUs: READ_REQUEST_RATE*5,
+            maxVus: READ_REQUEST_RATE*5,
+        },
     },
 };
 
@@ -263,6 +217,7 @@ export function write() {
                 // everytime the label is different
                 agent_hostname: 'host${series_id}',                         // Each value of this label will match 1 series.
                 __replica__: `replica_${ha_replica}`,              // Name of the ha replica sending this.
+                agent_data: '${series_id}',                         // Value of the series.
             }
         );
         console.log('the min series id is: host', min_series_id);
@@ -280,208 +235,66 @@ export function write() {
     }
 }
 
-//
-// Read path config + helpers.
-//
+export function read() {
+    try {
+        const time = Math.ceil(Date.now() / 1000) - 60;
+        const query = generateQuery();
+        const res = query_client.post('/query', {
+            query: query,
+            time: time,
+        });
 
-/**
- * Number of seconds in one hour.
- * @constant {number}
- */
-const HOUR_SECONDS = 60 * 60;
-/**
- * Number of seconds in one day.
- * @constant {number}
- */
-const DAY_SECONDS = 24 * HOUR_SECONDS;
-/**
- * Number of seconds in one week.
- * @constant {number}
- */
-const WEEK_SECONDS = 7 * DAY_SECONDS;
-
-/**
- * The percentage of metrics we expect to touch when querying as a decimal. It's not realistic
- * that a customer would query back all metrics they push but instead they typically touch a subset of these
- * metrics when querying.
- * @constant {number}
- */
-const QUERY_METRICS_SUBSET = 0.2; // 20%
-
-/**
- * The oldest timestamp (in seconds) that can be queried with range queries. This is used to prevent to
- * query metrics having a different set of labels in the past and thus causing the error:
- * "vector cannot contain metrics with the same labelset".
- * @constant {number}
- */
-const QUERY_MIN_TIME_SECONDS = Date.parse("2022-03-30T13:00:00Z") / 1000
-
-const query_distribution = {
-    9: 'sum by(cardinality_1e2) (rate($metric[$rate_interval]))',
-    11: 'sum(rate($metric[$rate_interval]))',
-    80: 'sum by(cardinality_1e1) (rate($metric[$rate_interval]))',
-}
-
-/**
- * The distribution of time ranges, rate interval and queries used to generate random range queries executed on the target.
- * For each configurable setting the key is the distribution percentage as float from 0 to 100.
- * The value is the setting value that will be used a % (distribution) number of times.
- * @constant {object}
- */
-const range_query_distribution = {
-    time_range: {
-        0.1: WEEK_SECONDS,
-        0.9: 3 * DAY_SECONDS,
-        2: DAY_SECONDS,
-        27: 6 * HOUR_SECONDS,
-        70: HOUR_SECONDS,
-    },
-    rate_interval: {
-        1: '1h',
-        9: '10m',
-        20: '5m',
-        70: '1m',
-    },
-    query: query_distribution,
-    cardinality: {
-        // The cardinality must be a power of 10 (because of how "cardinality labels" are generated).
-        // Do not query more than 10k series otherwise we hit the 50M max samples limits.
-        30: 1e2, // 100
-        50: 1e3, // 1k
-        20: 1e4, // 10k
-    },
-};
-
-/**
- * The distribution of rate intervals and queries used to generate random instant queries executed on the target.
- * For each configurable setting the key is the distribution percentage as float from 0 to 100.
- * The value is the setting value that will be used a % (distribution) number of times.
- * @constant {object}
- */
-const instant_query_low_cardinality_distribution = {
-    rate_interval: {
-        0.1: '24h',
-        0.9: '6h',
-        5: '1h',
-        14: '10m',
-        80: '5m',
-    },
-    query: query_distribution,
-    cardinality: {
-        // The cardinality must be a power of 10 (because of how "cardinality labels" are generated).
-        30: 1e2, // 100
-        70: 1e3, // 1k
-    },
-};
-
-/**
- * The distribution of rate intervals and queries used to generate random instant queries executed on the target.
- * For each configurable setting the key is the distribution percentage as float from 0 to 100.
- * The value is the setting value that will be used a % (distribution) number of times.
- * @constant {object}
- */
-const instant_query_high_cardinality_distribution = {
-    rate_interval: {
-        20: '5m',
-        80: '1m',
-    },
-    query: query_distribution,
-    cardinality: {
-        // The cardinality must be a power of 10 (because of how "cardinality labels" are generated).
-        90: 1e4, // 10k
-        10: 1e5, // 100k
-    },
-};
-
-// Ensure all distributions sum up to 100%.
-assert_distribution_config(range_query_distribution);
-assert_distribution_config(instant_query_low_cardinality_distribution);
-assert_distribution_config(instant_query_high_cardinality_distribution);
-
-function assert_distribution_config(config) {
-    for (const [name, distribution] of Object.entries(config)) {
-        let sum = 0;
-        for (const [percent, range] of Object.entries(distribution)) {
-            sum += parseFloat(percent);
-        }
-
-        if (sum != 100) {
-            throw new Error(`${name} distribution is invalid (total sum is ${sum}% while 100% was expected)`);
-        }
+        check(res, {
+            'read worked': (r) => r.status === 200 && r.json('status') === "success" && r.json('data.resultType') === "vector",
+        }, { type: "read" }) || fail(`ERR: write failed. Status: ${res.status}. Body: ${res.body}`);
+    }
+    catch (e) {
+        check(null, {
+            'read worked': () => false,
+        }, { type: "read" });
+        throw e;
     }
 }
-
-/**
- * Returns a random float number between min and max.
- * @param {number} min The min value.
- * @param {number} max The max value
- * @returns {number}
- */
-function random_float_between(min, max) {
-    return min + (Math.random() * (max - min))
-}
-
-/**
- * Returns a random entry from the provided config object where the object keys are the percentage of the distribution as a float.
- * Given a sufficiently large number of calls to this function, each
- * value is returned from the config a number of times (in %) close to the configured distribution (key).
- * @param {object} config An object with keys representing the percentage within the distribution.
- * @return {any} A random value from the config object.
- */
-function get_random_entry_from_config(config) {
-    const rand = random_float_between(0, 100);
-    let sum = 0;
-
-    for (const [percent, value] of Object.entries(config)) {
-        sum += parseFloat(percent);
-
-        if (sum >= rand) {
-            return value;
-        }
+function generateQuery() {
+    const rateQuery = Math.random();
+    if (rateQuery < 0.3) {
+        return "(" + singleQuery() + "-" + singleQuery() + ")/(1024*1024)"; 
+    }else if (rateQuery < 0.7) {
+        const sin = singleQuery();
+        const constinterval = Math.floor(Math.random() * 10) + 1;
+        return `rate(${sin}[${constinterval}m]) * 1000`;
     }
-
-    throw new Error(`get_random_entry_from_config() has not been able to find a distribution config for random value ${rand} but this should never happen`);
+    return singleQuery();
 }
 
-/**
- * Returns a random rate() query from the with possibly substituted values for metric names and rate intervals.
- * @param {object} config An object with keys representing the percentage within the distribution.
- * Values should be query strings with that may contain $metric and $rate_interval for substitution.
- * @param {string} rate_interval The rate interval as a string parseable by the Prometheus duration format.
- * @return {string} A Prometheus query expression.
- */
-function get_random_query_from_config(config, cardinality, rate_interval) {
-    const cardinality_exp = Math.log10(cardinality)
-
-    // Find the max group ID (0 based) based on the given query cardinality.
-    const cardinality_group_max_id = Math.floor(TOTAL_SERIES / cardinality) - 1;
-
-    // Query a group between 0 and the max, honoring QUERY_METRICS_SUBSET. Pick a random one
-    // instead of relying it on "iterationInTest" in order to reduce cache hit ratio (eg. when
-    // the test restarts).
-    const cardinality_group_id = randomIntBetween(0, Math.ceil(cardinality_group_max_id * QUERY_METRICS_SUBSET));
-    const metric_selector = `{cardinality_1e${cardinality_exp}="${cardinality_group_id}"}`;
-
-    // Get a random query from config and replace placeholders.
-    let query = get_random_entry_from_config(config);
-    query = query.replace(/\$metric/g, metric_selector);
-    query = query.replace(/\$rate_interval/g, rate_interval);
+function singleQuery() {
+    const nameIndex = Math.floor(Math.random() * 6);
+    const metricsName = names[nameIndex];
+    const removeIndex = Math.floor(Math.random() * WRITE_SERIES_PER_REQUEST);
+    const hostNames = combineHosts(0, removeIndex) + '|' + combineHosts(removeIndex + 1, WRITE_SERIES_PER_REQUEST+1);
+    // const hostNames = "host1"
+    // const rateQuery = Math.random() < 0.7;
+    // const includeValue = Math.floor(Math.random() * 10);
+    const query = `${metricsName}{agent_hostname=~\"${hostNames}\"}`;
+    
     return query;
 }
 
-/**
- * Aligns the provided timestamp to step.
- * @param {number} ts Timestamp in seconds.
- * @param {number} step Step in seconds.
- * @returns {number}
- */
-function align_timestamp_to_step(ts, step) {
-    if (ts % step === 0) {
-        return ts
+function combineHosts(start, end) {
+    let combinedHosts = '';
+    
+    for (let i = start; i < end; i++) {
+        const flag1 = Math.random() < 0.5;
+        const flag2 = Math.random() < 0.7;
+        combinedHosts = flag2? (flag1 ? 'host' + i + '|' + combinedHosts : combinedHosts + 'host' + i + '|') : combinedHosts;
     }
-
-    return ts - (ts % step)
-}
+    // Remove the trailing pipe symbol
+    if (combinedHosts.endsWith('|')) {
+        combinedHosts = combinedHosts.slice(0, -1);
+    }
+    
+    return combinedHosts;
+  }
 
 /**
  * Returns the write URL.
@@ -508,90 +321,7 @@ function get_read_authentication_headers() {
     
     if (TENANT_ID !== '') {
         auth_headers.set('X-Scope-OrgID', TENANT_ID)
-
     }
     
     return auth_headers;
-}
-
-/**
- * Runs a range query randomly generated based on the configured distribution defined in range_query_distribution.
- * It validate that a successful response is received and tags requests with { type: "read" } so that requests can be distinguished from writes.
- */
-export function run_range_query() {
-    const name = "range query";
-
-    const time_range = get_random_entry_from_config(range_query_distribution.time_range);
-    const step = get_range_query_step(time_range);
-    const end = align_timestamp_to_step(Math.ceil(Date.now() / 1000), step);
-    const start = align_timestamp_to_step(Math.max(end - time_range, QUERY_MIN_TIME_SECONDS), step);
-    const rate_interval = get_random_entry_from_config(range_query_distribution.rate_interval);
-    const cardinality = get_random_entry_from_config(range_query_distribution.cardinality);
-    const query = get_random_query_from_config(range_query_distribution.query, cardinality, rate_interval);
-
-    console.debug("range query - time_range:", time_range, "start:", start, "end:", end, "step:", step, "query:", query)
-
-    describe(name, () => {
-        const res = query_client.post('/query_range', {
-            query: query,
-            start: start,
-            end: end,
-            step: `${step}s`,
-        }, {
-            tags: {
-                name: name,
-                type: "read",
-            },
-        });
-
-        expect(res.status, "request status").to.equal(200);
-        expect(res).to.have.validJsonBody();
-        expect(res.json('status'), "status field is 'success'").to.equal("success");
-        expect(res.json('data.resultType'), "resultType is 'matrix'").to.equal("matrix");
-    });
-}
-
-/**
- * See run_instant_query().
- */
-export function run_instant_query_low_cardinality() {
-    run_instant_query("instant query low cardinality", instant_query_low_cardinality_distribution)
-}
-
-/**
- * See run_instant_query().
- */
-export function run_instant_query_high_cardinality() {
-    run_instant_query("instant query high cardinality", instant_query_high_cardinality_distribution)
-}
-
-/**
- * Runs an instant query randomly generated based on the configured distribution defined in instant_query_distribution.
- * It validate that a successful response is received and tags requests with { type: "read" } so that requests can be distinguished from writes.
- * Instant queries are run with a time one minute in the past to simulate rule evaluations.
- */
-export function run_instant_query(name, config) {
-    const time = Math.ceil(Date.now() / 1000) - 60;
-    const rate_interval = get_random_entry_from_config(config.rate_interval);
-    const cardinality = get_random_entry_from_config(config.cardinality);
-    const query = get_random_query_from_config(config.query, cardinality, rate_interval);
-
-    console.debug(name, " - query: ", query)
-
-    describe(name, () => {
-        const res = query_client.post('/query', {
-            query: query,
-            time: time,
-        }, {
-            tags: {
-                name: name,
-                type: "read",
-            }
-        });
-
-        expect(res.status, "request status").to.equal(200);
-        expect(res).to.have.validJsonBody();
-        expect(res.json('status'), "status field").to.equal("success");
-        expect(res.json('data.resultType'), "data.resultType field").to.equal("vector");
-    });
 }
