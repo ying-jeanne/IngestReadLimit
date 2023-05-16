@@ -217,8 +217,18 @@ export const options = {
  * Generates and writes series, checking the results.
  * Requests are tagged with { type: "write" } so that they can be distinguished from queries.
  */
+const names = [
+    'windows_system_system_up_time', 
+    'windows_net_packets_outbound_discarded_total', 
+    'windows_logical_disk_writes_total', 
+    'windows_logical_disk_read_seconds_total',
+    'windows_os_paging_limit_bytes',
+    'windows_net_packets_sent_total',
+];
 export function write() {
     try {
+        const nameIndex = Math.floor(Math.random() * 6);
+        const name = names[nameIndex];
         // iteration only advances after every second test iteration,
         // because we want to send every series twice to simulate HA pairs.
         const iteration = Math.floor(exec.scenario.iterationInTest / HA_REPLICAS);
@@ -249,7 +259,7 @@ export function write() {
 
             // Beginning of label/value templates.
             {
-                __name__: 'windows_os_process_memory_limix_bytes', // Name of the series.
+                __name__: name, // Name of the series.
                 // everytime the label is different
                 agent_hostname: 'host${series_id}',                         // Each value of this label will match 1 series.
                 __replica__: `replica_${ha_replica}`,              // Name of the ha replica sending this.
