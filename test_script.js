@@ -3,8 +3,6 @@ import encoding from 'k6/encoding';
 import exec from 'k6/execution';
 import remote from 'k6/x/remotewrite';
 
-import { describe, expect } from 'https://jslib.k6.io/k6chaijs/4.3.4.1/index.js';
-import { randomIntBetween } from "https://jslib.k6.io/k6-utils/1.1.0/index.js";
 import { Httpx } from 'https://jslib.k6.io/httpx/0.0.6/index.js';
 
 /**
@@ -108,7 +106,7 @@ get_read_authentication_headers().forEach((value, key) => {
 const query_client = new Httpx({
     baseURL: `${SCHEME}://${READ_HOSTNAME}/prometheus/api/v1`,
     headers: query_client_headers,
-    timeout: 120e3 // 120s timeout.
+    timeout: 1200e3 // 1200s timeout.
 });
 
 /**
@@ -181,8 +179,8 @@ const names = [
 ];
 export function write() {
     try {
-        const nameIndex = Math.floor(Math.random() * 6);
-        const name = names[nameIndex];
+        const nameIndex = Math.floor(Math.random() * 10);
+        const name = names[nameIndex] + "_" + Math.floor(Math.random() * 6);
         // iteration only advances after every second test iteration,
         // because we want to send every series twice to simulate HA pairs.
         const iteration = Math.floor(exec.scenario.iterationInTest / HA_REPLICAS);
@@ -215,9 +213,9 @@ export function write() {
             {
                 __name__: name, // Name of the series.
                 // everytime the label is different
-                agent_hostname: 'host${series_id}',                         // Each value of this label will match 1 series.
+                agent_hostname: 'host${series_id%2500}',  // Each value of this label will match 1 series.
                 __replica__: `replica_${ha_replica}`,              // Name of the ha replica sending this.
-                agent_data: '${series_id}',                         // Value of the series.
+                agent_data: '${series_id}',
             }
         );
         console.log('the min series id is: host', min_series_id);
@@ -246,7 +244,7 @@ export function read() {
 
         check(res, {
             'read worked': (r) => r.status === 200 && r.json('status') === "success" && r.json('data.resultType') === "vector",
-        }, { type: "read" }) || fail(`ERR: write failed. Status: ${res.status}. Body: ${res.body}`);
+        }, { type: "read" }) || fail(`ERR: read failed. Status: ${res.status}. Body: ${res.body}`);
     }
     catch (e) {
         check(null, {
@@ -257,9 +255,9 @@ export function read() {
 }
 function generateQuery() {
     const rateQuery = Math.random();
-    if (rateQuery < 0.3) {
+    if (rateQuery < 0.5) {
         return "(" + singleQuery() + "-" + singleQuery() + ")/(1024*1024)"; 
-    }else if (rateQuery < 0.7) {
+    }else if (rateQuery < 0.8) {
         const sin = singleQuery();
         const constinterval = Math.floor(Math.random() * 10) + 1;
         return `rate(${sin}[${constinterval}m]) * 1000`;
@@ -268,15 +266,12 @@ function generateQuery() {
 }
 
 function singleQuery() {
+    let useReg = Math.random() < 0.5;
     const nameIndex = Math.floor(Math.random() * 6);
-    const metricsName = names[nameIndex];
+    const metricsName = names[nameIndex] + "_" + Math.floor(Math.random() * 10);
     const removeIndex = Math.floor(Math.random() * WRITE_SERIES_PER_REQUEST);
     const hostNames = combineHosts(0, removeIndex) + '|' + combineHosts(removeIndex + 1, WRITE_SERIES_PER_REQUEST+1);
-    // const hostNames = "host1"
-    // const rateQuery = Math.random() < 0.7;
-    // const includeValue = Math.floor(Math.random() * 10);
-    const query = `${metricsName}{agent_hostname=~\"${hostNames}\"}`;
-    
+    const query = useReg?`${metricsName}{agent_hostname=~\"${hostNames}\", agent_data!~\"${nameIndex}.*\"}`:`${metricsName}{agent_hostname=~\"${hostNames}\"}`;
     return query;
 }
 
