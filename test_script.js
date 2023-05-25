@@ -46,6 +46,8 @@ const WRITE_REQUEST_RATE = parseInt(__ENV.K6_WRITE_REQUEST_RATE || 1);
  * @constant {number}
  */
 const WRITE_SERIES_PER_REQUEST = parseInt(__ENV.K6_WRITE_SERIES_PER_REQUEST || 1000);
+
+const READ_SERIES_PER_REQUEST = parseInt(__ENV.K6_READ_SERIES_PER_REQUEST || 1000);
 /**
  * Total number of unique series to generate and write.
  * @constant {number}
@@ -171,16 +173,11 @@ export const options = {
  */
 const names = [
     'windows_system_system_up_time', 
-    'windows_net_packets_outbound_discarded_total', 
-    'windows_logical_disk_writes_total', 
-    'windows_logical_disk_read_seconds_total',
-    'windows_os_paging_limit_bytes',
-    'windows_net_packets_sent_total',
 ];
 export function write() {
     try {
         const nameIndex = Math.floor(Math.random() * 10);
-        const name = names[nameIndex] + "_" + Math.floor(Math.random() * 6);
+        const name = names[0]; // + "_" + Math.floor(Math.random() * 6);
         // iteration only advances after every second test iteration,
         // because we want to send every series twice to simulate HA pairs.
         const iteration = Math.floor(exec.scenario.iterationInTest / HA_REPLICAS);
@@ -237,6 +234,7 @@ export function read() {
     try {
         const time = Math.ceil(Date.now() / 1000) - 60;
         const query = generateQuery();
+        console.log(query)
         const res = query_client.post('/query', {
             query: query,
             time: time,
@@ -268,9 +266,9 @@ function generateQuery() {
 function singleQuery() {
     let useReg = Math.random() < 0.5;
     const nameIndex = Math.floor(Math.random() * 6);
-    const metricsName = names[nameIndex] + "_" + Math.floor(Math.random() * 10);
-    const removeIndex = Math.floor(Math.random() * WRITE_SERIES_PER_REQUEST);
-    const hostNames = combineHosts(0, removeIndex) + '|' + combineHosts(removeIndex + 1, WRITE_SERIES_PER_REQUEST+1);
+    const metricsName = names[0]; // + "_" + Math.floor(Math.random() * 10);
+    const removeIndex = Math.floor(Math.random() * READ_SERIES_PER_REQUEST);
+    const hostNames = combineHosts(0, removeIndex) + '|' + combineHosts(removeIndex + 1, READ_SERIES_PER_REQUEST+1);
     const query = useReg?`${metricsName}{agent_hostname=~\"${hostNames}\", agent_data!~\"${nameIndex}.*\"}`:`${metricsName}{agent_hostname=~\"${hostNames}\"}`;
     return query;
 }
@@ -297,7 +295,7 @@ function combineHosts(start, end) {
  */
 function get_remote_write_url() {
     if (USERNAME !== '' || WRITE_TOKEN !== '') {
-        return `${SCHEME}://${USERNAME}:${WRITE_TOKEN}@${WRITE_HOSTNAME}/api/v1/push`;
+        return `${SCHEME}://${WRITE_HOSTNAME}/api/v1/push`;
     }
 
     return `${SCHEME}://${WRITE_HOSTNAME}/api/v1/push`;
